@@ -1,0 +1,239 @@
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r , eval = FALSE}
+if (require(pacman) == FALSE) {
+install.packages("pacman")
+}
+pacman::p_load(
+caTools,ROSE,caret,e1071,randomForest,gbm,FSelector,Boruta,dplyr
+)
+```
+
+```{r, data mining}
+data<- read.csv("data.csv")
+str(data)
+data2 <- unique.data.frame(data)
+data2<-na.omit(data2)
+data2$CLASS <- as.factor(data2$CLASS)
+data2$ID <- NULL
+
+attr_weights <- information.gain(CLASS ~., data2) #check information gain of age and age_ctg
+data2$AGE_CTG <- NULL
+
+count(data, CM_HIST) #check the distribution of CM_HIST 
+data2$CM_HIST <- NULL #every observation has 0 for CM_HIST column, so drop this column
+
+data3 <- data2 %>% mutate(PY1D = if_else(PY1 - PY2 > 0, 1, 0)) %>%
+       mutate(PY2D = if_else(PY2 - PY3 > 0, 1, 0)) %>%
+       mutate(PY3D = if_else(PY3 - PY4 > 0, 1, 0)) %>%
+       mutate(PY4D = if_else(PY4 - PY5 > 0, 1, 0)) %>%
+       mutate(PY5D = if_else(PY5 - PY6 > 0, 1, 0)) %>%
+       mutate(SumPYD = PY1D+PY2D+PY3D+PY4D+PY5D )
+```
+
+
+```{r, data partition}
+# Set seed to 123
+set.seed(123)
+
+# Partition the data
+split <- sample.split(data3$CLASS, SplitRatio = 0.80) 
+
+# Generate training and test sets and save as trainingset and testset
+training <- subset(data3, split == TRUE )
+oversample <- ovun.sample(CLASS ~ ., data = training, method = "both", seed =1)$data
+test <- subset(data3, split == FALSE)
+```
+
+```{r, randomForest}
+set.seed(1)
+train_sub <- sample.split(oversample$CLASS, SplitRatio = 0.4) 
+training_sub <- subset(oversample,train_sub == TRUE )
+
+#attr_weights <- information.gain(CLASS ~., training_sub)
+#col_names <- colnames(training_sub)
+#col_names_new <- col_names[attr_weights$attr_importance > 0] 
+#training_sub <- training_sub[, col_names_new] 
+
+training_sub <- training_sub %>% select(-c("PY1D", "PY2D", "PY3D", "PY4D", "PY5D"))  
+
+mtry_val <- seq(2,7,2)
+nodesize_val <- seq(1, 10, 2)
+sampsize_val <- floor(nrow(training_sub)*c(0.5, 0.7, 0.8))
+setOfvalues <- expand.grid(mtry = mtry_val, nodesize = nodesize_val, sampsize = sampsize_val)
+
+# Write a  loop over the rows of setOfvalues to train random forest model for all possible values
+#err <- c()  # min error
+#err2 <- c() # max recall
+err3 <- c()  # min expected cost
+sum <- nrow(training_sub)
+
+for (i in 1:nrow(setOfvalues)){
+    # Since random forest model uses random numbers set the seed
+    set.seed(10)
+    
+    # Train a Random Forest model
+    model <- randomForest(CLASS~., training_sub,
+                          mtry = setOfvalues$mtry[i],
+                          nodesize = setOfvalues$nodesize[i],
+                          sampsize = setOfvalues$sampsize[i])
+                 
+    # Store the error rate for the model   
+    # err[i] <- model$err.rate[nrow(model$err.rate), "OOB"]
+    # err2[i] <- model$confusion[4]/(model$confusion[3]+model$confusion[4]) #calculate recall
+    err3[i] <- 5*model$confusion[3]/sum + 1*model$confusion[2]/sum #calculate weighted loss
+}
+
+# Identify optimal set of hyperparmeters based on error rate
+#best_comb <- which.min(err)
+#best_comb2 <- which.max(err2)
+best_comb3 <- which.min(err3)
+#v <- setOfvalues[best_comb,]
+#v2 <- setOfvalues[best_comb2,]
+v3 <- setOfvalues[best_comb3,]
+    
+# Build Random Forest model and assign it to model_RF
+#set.seed(1)
+#model_RF <- randomForest(CLASS ~. , training_sub, mtry= v$mtry, nodesize = v$nodesize, sampsize= v$sampsize)
+#set.seed(2)
+#model_RF2 <- randomForest(CLASS ~. , training_sub, mtry= v2$mtry, nodesize = v2$nodesize, sampsize= v2$sampsize)
+set.seed(3)
+model_RF3 <- randomForest(CLASS ~. , training_sub, mtry= v3$mtry, nodesize = v3$nodesize, sampsize= v3$sampsize)
+
+
+# Predict the class of the test data
+#prediction_RF <- predict(model_RF, test)
+#prediction_RF2 <- predict(model_RF2, test)
+prediction_RF3 <- predict(model_RF3, test)
+
+# The last argument sets the positive class
+#(cf_rf <-confusionMatrix(prediction_RF, test$CLASS, positive='1', mode = "prec_recall"))
+#(rf <- 500*cf_rf$table[3]/sum+100*cf_rf$table[2]/sum)
+#(cf_rf2 <-confusionMatrix(prediction_RF2, test$CLASS, positive='1', mode = "prec_recall"))
+#(rf2<- 500*cf_rf2$table[3]/sum+100*cf_rf2$table[2]/sum)
+(cf_rf3 <-confusionMatrix(prediction_RF3, test$CLASS, positive='1', mode = "prec_recall"))
+(rf3<- 500*cf_rf3$table[3]/sum+100*cf_rf3$table[2]/sum)
+```
+
+
+```{r, Linear Regression}
+# Linear Regression
+
+# Build a logistic regression model assign it to LR_mod
+LR_mod <- glm(CLASS ~. , data = training_sub, family = "binomial")
+
+# Predict the class probabilities of the test data
+LR_prob <- predict(LR_mod, test, type="response")
+
+# Predict the class 
+LR_class <- ifelse(LR_prob >= 0.5, "1", "0")
+ 
+# Save the predictions as factor variables
+LR_class <- as.factor(LR_class)
+
+# Confusion matrix
+(cf_lm <- confusionMatrix(LR_class, test$CLASS, positive='1', mode = "prec_recall"))
+(lm<- 500*cf_lm$table[3]/sum+100*cf_lm$table[2]/sum)
+```
+
+
+```{r, SVM}
+#SVM Model
+svm_radial <- svm(CLASS ~., data = training_sub, kernel = "radial", scale = TRUE)
+
+set.seed(1)
+tune_out = tune(svm, CLASS~., data = training_sub, kernel = "radial",
+                ranges = list(cost = c(0.1, 1, 5)))
+svm_best = tune_out$best.model
+
+svm_predict = predict(svm_best, test, probability = TRUE)
+
+(cf_svm<-confusionMatrix(svm_predict, test$CLASS, positive = '1', mode = "prec_recall"))
+(svm<- 500*cf_svm$table[3]/sum+100*cf_svm$table[2]/sum)
+```
+
+
+```{r, GBM}
+# GBM Model
+
+# Change the data type of the target variable
+
+training_sub2 <- training_sub
+training_sub2$CLASS <- as.numeric(training_sub$CLASS)-1
+
+# Build the GBM model
+set.seed(1)
+GBM_model <- gbm(CLASS ~., training_sub2, distribution = "bernoulli", n.trees = 123, interaction.depth = 3, cv.folds = 5)
+set.seed(2)
+GBM_model2 <- gbm(CLASS ~., training_sub2, distribution = "bernoulli", n.trees = 123, interaction.depth = 5, cv.folds = 5)
+
+# Find the number of trees for the prediction
+ntree_opt <- gbm.perf(GBM_model, method = "cv")
+ntree_opt2<-gbm.perf(GBM_model2, method ="cv")
+ntree_opt3<-gbm.perf(GBM_model, method ="OOB")
+ntree_opt4<-gbm.perf(GBM_model2, method ="OOB")
+
+# Obtain prediction probabilities using ntree_opt
+GBM_prob <-  predict(GBM_model, test, n.trees = ntree_opt, type = "response")
+GBM_prob2 <-  predict(GBM_model2, test, n.trees = ntree_opt2, type = "response")
+GBM_prob3 <-  predict(GBM_model, test, n.trees = ntree_opt3, type = "response")
+GBM_prob4 <-  predict(GBM_model2, test, n.trees = ntree_opt4, type = "response")
+
+# Make predictions with threshold value 0.5
+GBM_pred <- ifelse(GBM_prob >= 0.5, "1", "0")
+GBM_pred2 <- ifelse(GBM_prob2 >= 0.5, "1", "0")
+GBM_pred3 <- ifelse(GBM_prob3 >= 0.5, "1", "0")
+GBM_pred4 <- ifelse(GBM_prob4 >= 0.5, "1", "0")
+
+# Save the predictions as a factor variable
+GBM_pred <- as.factor(GBM_pred)
+GBM_pred2 <- as.factor(GBM_pred2)
+GBM_pred3 <- as.factor(GBM_pred3)
+GBM_pred4 <- as.factor(GBM_pred4)
+
+
+# Confusion matrix
+(cf_gbm <- confusionMatrix(GBM_pred, test$CLASS, positive='1', mode = "prec_recall"))
+(gbm <- 500*cf_gbm$table[3]/sum + 100*cf_gbm$table[2]/sum)
+(cf_gbm2 <- confusionMatrix(GBM_pred3, test$CLASS, positive='1', mode = "prec_recall"))
+(gbm2 <- 500*cf_gbm2$table[3]/sum + 100*cf_gbm2$table[2]/sum)
+(cf_gbm3 <- confusionMatrix(GBM_pred2, test$CLASS, positive='1', mode = "prec_recall"))
+(gbm3 <- 500*cf_gbm2$table[3]/sum + 100*cf_gbm3$table[2]/sum)
+(cf_gbm4 <- confusionMatrix(GBM_pred4, test$CLASS, positive='1', mode = "prec_recall"))
+(gbm4 <- 500*cf_gbm4$table[3]/sum + 100*cf_gbm4$table[2]/sum)
+
+(gbm_result <- cbind(gbm,gbm2, gbm3, gbm4))
+(gbm_final <- min(gbm, gbm2, gbm3, gbm4) )
+
+```
+
+```{r, Decision Tree}
+# Decision Tree
+library(tree)
+library(maptree)
+
+#Building the decision tree
+tree_pay <- tree(CLASS ~., training_sub, control = tree.control(nrow(training)))
+
+#Predict in the training set
+tree_predict_training <- predict(tree_pay, training_sub,type = "class")
+dt_pred <- predict(tree_pay, test, type = "class")
+
+(cf_dt <- confusionMatrix(dt_pred, test$CLASS, positive='1', mode = "prec_recall"))
+(dt<- 500*cf_dt$table[3]/sum+100*cf_dt$table[2]/sum)
+
+
+#Use cTree model to build the decision tree
+library(partykit)
+decTree <- ctree(CLASS~., training_sub)
+decTree_predict <- predict(decTree, test, type = "response")
+(cf_dt2 <- confusionMatrix(decTree_predict, test$CLASS, positive='1', mode = "prec_recall"))
+(dt2<- 500*cf_dt2$table[3]/sum+100*cf_dt2$table[2]/sum)
+dt_final<-min(dt,dt2)
+```
+
+```{r, final result}
+(result <- cbind(lm,svm, dt_final,rf_final,gbm_final))
+```
